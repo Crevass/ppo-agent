@@ -7,6 +7,8 @@ import time
 
 class Runner(object):
 	def __init__(self, env, model, n_step, gamma, lam):
+		# make sure every agent start with a same env
+		env.seed(0)
 		self.env = env
 		self.model = model
 		self.n_step = n_step
@@ -16,8 +18,10 @@ class Runner(object):
 		self.ob[:] = env.reset().copy()
 		self.ep_reward = 0
 		self.episode = 0
+		self.enable_reset = True
 	def run(self):
-		# reset replay	
+		# reset replay
+		self.enable_reset = False	
 		mb_obs, mb_rews, mb_acs, mb_vs, mb_dones = [], [], [], [], []
 		eprews = []
 		for _ in range(self.n_step):
@@ -56,7 +60,16 @@ class Runner(object):
 		mb_acs = np.vstack(mb_acs)
 		mb_targv = mb_adv.copy() + mb_vs.copy()
 
+		self.enable_reset = True
 		return dict(ob=mb_obs.copy(), adv=mb_adv.copy(), vs=mb_vs.copy(), ac=mb_acs.copy(), targv=mb_targv.copy(), epreward=eprews.copy())
+
+	def reset_with_seed(self, seed=np.random.rand()*4):
+		assert self.enable_reset == True, 'reset is not allowed while generating replay'
+		self.env.seed(seed)
+		self.ob[:] = self.env.reset().copy()
+
+
+
 
 class PPOModel(object):
 	def __init__(self, ob_space, ac_space, c_entropy, c_vf, session, max_grad_norm=0.5):
@@ -146,7 +159,7 @@ class PPOModel(object):
 
 
 		# minibatch train
-		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, scale_by_procs=False):
+		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, scale_by_procs=True):
 			mb_adv = (mb_adv - mb_adv.mean()) / mb_adv.std()
 			feeddict = {agent_model.ob: mb_obs,
 						a: mb_acs,
@@ -167,7 +180,7 @@ class PPOModel(object):
 			
 			# scale the global gradients with mpirun number
 			if scale_by_procs:
-				global_grad = global_grad / (0.0 + MPI.COMM_WORLD.Get_size())
+				global_grad = global_grad / MPI.COMM_WORLD.Get_size()
 			
 			sess.run(_train, feed_dict={LR:lr, feed_grads: global_grad})
 			return sess.run([pg_loss, simple_vf_loss], feed_dict=feeddict)
@@ -186,7 +199,7 @@ class PPOModel(object):
 			MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
 
 			# scale params with agent_number
-			global_p = global_p / (0.0 + MPI.COMM_WORLD.Get_size())
+			global_p = global_p / MPI.COMM_WORLD.Get_size()
 			sess.run(_apply_params, feed_dict={feed_params: global_p, TAU_GLOBAL:tau})
 
 
@@ -227,6 +240,8 @@ def learn(*, policy=None, env, test_env,
 	runner = Runner(env=env, model=ppo_model.agent_model,
 					n_step=timestep_per_actor, gamma=gamma, lam=lam)
 	
+
+
 	# Tensorboard initialize
 	if MPI.COMM_WORLD.Get_rank() == 0:
 		writer = tf.summary.FileWriter(file_path+'/log', sess.graph)
@@ -269,6 +284,8 @@ def learn(*, policy=None, env, test_env,
 			print("********************** Iteration %i **********************" %iters)
 		# get new replay
 		#print("--- Generating replay...")
+		# seeding every env
+		runner.reset_with_seed(iters) 
 		batch = runner.run()
 		#print("--- Replay generated.")
 		ob, ac, adv, vs, targv = batch["ob"], batch["ac"], batch["adv"], batch["vs"], batch["targv"]
