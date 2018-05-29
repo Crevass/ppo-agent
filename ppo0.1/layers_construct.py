@@ -3,7 +3,7 @@ import numpy as np
 from common_util import variable_summaries
 from common_util import weight_variable
 from common_util import bias_variable
-
+# changed here for github usage
 def dense_layer(input_layer, nn_num, act, use_bias, trainable, scope, monitor_weight=False, monitor_bias=False, monitor_output=False):
 	size = input_layer.shape[-1]
 	with tf.variable_scope(scope, reuse=False):
