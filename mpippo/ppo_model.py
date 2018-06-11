@@ -28,8 +28,19 @@ class Synchronizer(object):
 		return avg_eprew
 
 	def sync_wrt_eprew(self, model, seed):
-		local_eprew = self.evaluate(model.agent_model, seed)
-		
+		assert isinstance(model, PPOModel), 'Should input a PPOModel class'
+		base = 1000
+		avg_eprew = self.evaluate(model.agent_model, seed) + base
+		local_eprew = np.array([avg_eprew])
+		total_eprew = np.zeros(1)
+		MPI.COMM_WORLD.Allreduce(local_eprew, total_eprew, op=MPI.SUM)
+		weight = local_eprew / total_eprew
+		local_p = model.get_params()
+		global_p = np.zeros_like(local_p)
+		local_p = local_p * weight
+		MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
+		model.agent_model.apply_params(global_p)
+
 
 class Runner(object):
 	def __init__(self, env, model, n_step, gamma, lam):
@@ -244,9 +255,10 @@ class PPOModel(object):
 		self.update_old_pi = update_old_pi
 		self.sync_params = sync_params
 		self.agent_model = agent_model
+		self.get_params = get_params
+		self.apply_params = apply_params
 
-
-def learn(*, policy=None, env, test_env,
+def learn(*, policy=None, env, test_env, eval_env,
 			timestep_per_actor,
 			clipparam,
 			c_entropy, c_vf,
@@ -276,6 +288,8 @@ def learn(*, policy=None, env, test_env,
 
 	runner = Runner(env=env, model=ppo_model.agent_model,
 					n_step=timestep_per_actor, gamma=gamma, lam=lam)
+
+	synchronizer = Synchronizer(eval_env, 10)
 
 	# Tensorboard initialize
 	if MPI.COMM_WORLD.Get_rank() == 0:
@@ -396,7 +410,8 @@ def learn(*, policy=None, env, test_env,
 							use_global_grad=False)
 				vflosses.append(np.squeeze(vloss))
 				pollosses.append(np.squeeze(ploss))
-		ppo_model.sync_params()
+		synchronizer.sync_wrt_eprew(ppo_model, iters)
+		#ppo_model.sync_params()
 		if MPI.COMM_WORLD.Get_rank() == 0:
 			# update tensorboard
 			summary = sess.run(merged)
