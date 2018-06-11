@@ -5,6 +5,28 @@ import gym
 from policies import MlpPolicy
 import time
 
+class Tester(object):
+	def __init__(self, env, n_episode):
+		self.env = env
+		self.n_episode = n_episode
+	def test(self, agent, seed):
+		eprews = np.zeros(self.n_episode)
+		ep_reward = 0
+		self.env.seed(seed)
+		self.env.reset()
+		for ep in range(self.n_episode):
+			ob = self.env.reset()
+			ep_reward = 0
+			while True:
+				ac, _ = agent.step(ob)
+				ob, r, done, _ = self.env.step(np.clip(ac, self.env.action_space.low, self.env.action_space.high))
+				ep_reward += r
+				if done:
+					break
+			eprews[ep] = ep_reward
+		avg_eprew = eprews.mean()
+		return avg_eprew
+
 class Runner(object):
 	def __init__(self, env, model, n_step, gamma, lam):
 		# make sure every agent start with a same env
@@ -146,9 +168,11 @@ class PPOModel(object):
 			start = end
 		# create grad-params pair list
 		grads_list = list(zip(update_list, self.train_params))
+		local_grad_list = list(zip(grads, self.train_params))
 		self.optimizer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
 		_train = self.optimizer.apply_gradients(grads_list)
-		
+		_local_train = self.optimizer.apply_gradients(local_grad_list)
+
 		## opt for params assignment
 		p_list = []
 		start = 0
@@ -160,7 +184,7 @@ class PPOModel(object):
 
 
 		# minibatch train
-		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, scale_by_procs=True):
+		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, use_global_grad, scale_by_procs=True):
 			mb_adv = (mb_adv - mb_adv.mean()) / mb_adv.std()
 			feeddict = {agent_model.ob: mb_obs,
 						a: mb_acs,
@@ -168,22 +192,25 @@ class PPOModel(object):
 						target_v: mb_targv,
 						old_v: mb_vs,
 						CLIP_RANGE: cliprange}
+			if use_global_grad:
+				# get local gradients list
+				local_grad = sess.run(self.flat_grads, feed_dict=feeddict)
+				assert local_grad.ndim == 1, 'gradients not flattened!'
 
-			# get local gradients list
-			local_grad = sess.run(self.flat_grads, feed_dict=feeddict)
-			assert local_grad.ndim == 1, 'gradients not flattened!'
-
-			# initialize global gradients list
-			global_grad = np.zeros_like(local_grad)
-			
-			# sync gradients in global gradients buffer
-			MPI.COMM_WORLD.Allreduce(local_grad, global_grad, op=MPI.SUM)
-			
-			# scale the global gradients with mpirun number
-			if scale_by_procs:
-				global_grad = global_grad / MPI.COMM_WORLD.Get_size()
-			
-			sess.run(_train, feed_dict={LR:lr, feed_grads: global_grad})
+				# initialize global gradients list
+				global_grad = np.zeros_like(local_grad)
+				
+				# sync gradients in global gradients buffer
+				MPI.COMM_WORLD.Allreduce(local_grad, global_grad, op=MPI.SUM)
+				
+				# scale the global gradients with mpirun number
+				if scale_by_procs:
+					global_grad = global_grad / MPI.COMM_WORLD.Get_size()
+				
+				sess.run(_train, feed_dict={LR:lr, feed_grads: global_grad})
+			else:
+				feeddict[LR] = lr
+				sess.run(_local_train, feed_dict=feeddict)
 			return sess.run([pg_loss, vf_loss], feed_dict=feeddict)
 
 		# update old pi with pi
