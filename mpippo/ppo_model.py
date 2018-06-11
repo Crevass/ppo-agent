@@ -10,7 +10,7 @@ class Synchronizer(object):
 		self.env = env
 		self.n_episode = n_episode
 	def evaluate(self, agent, seed):
-		eprews = np.zeros(self.n_episode)
+		eprews = np.zeros(self.n_episode, dtype=np.float64)
 		ep_reward = 0
 		self.env.seed(seed)
 		self.env.reset()
@@ -29,17 +29,17 @@ class Synchronizer(object):
 
 	def sync_wrt_eprew(self, model, seed):
 		assert isinstance(model, PPOModel), 'Should input a PPOModel class'
-		base = 1000
+		base = 1000.0
 		avg_eprew = self.evaluate(model.agent_model, seed) + base
-		local_eprew = np.array([avg_eprew])
-		total_eprew = np.zeros(1)
+		local_eprew = np.array([avg_eprew], dtype=np.float64)
+		total_eprew = np.zeros(1,dtype=np.float64)
 		MPI.COMM_WORLD.Allreduce(local_eprew, total_eprew, op=MPI.SUM)
 		weight = local_eprew / total_eprew
 		local_p = model.get_params()
-		global_p = np.zeros_like(local_p)
+		global_p = np.zeros_like(local_p,dtype=np.float64)
 		local_p = local_p * weight
 		MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
-		model.agent_model.apply_params(global_p)
+		model.apply_params(global_p)
 
 
 class Runner(object):
@@ -441,7 +441,6 @@ def learn(*, policy=None, env, test_env, eval_env,
 					if done:
 						#testob = test_env.reset()
 						break
-
 
 
 
