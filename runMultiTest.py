@@ -41,4 +41,3 @@ if __name__ == '__main__':
 
 	env.close()
 	test_env.close()
-	eval_env.close()
