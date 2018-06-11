@@ -373,8 +373,6 @@ def learn(*, policy=None, env, test_env,
 			print("--- Optimizing...")
 		for oe in range(optim_epchos):
 			# sync parameters
-			ppo_model.sync_params()
-
 			np.random.shuffle(index)
 			for start in range(0, timestep_per_actor, optim_batchsize):
 				end = start + optim_batchsize
@@ -385,10 +383,11 @@ def learn(*, policy=None, env, test_env,
 							mb_acs=ac[mb_index],
 							mb_adv=adv[mb_index],
 							mb_vs=vs[mb_index],
-							mb_targv=targv[mb_index])
+							mb_targv=targv[mb_index],
+							use_global_grad=False)
 				vflosses.append(np.squeeze(vloss))
 				pollosses.append(np.squeeze(ploss))
-	
+		ppo_model.sync_params()
 		if MPI.COMM_WORLD.Get_rank() == 0:
 			# update tensorboard
 			summary = sess.run(merged)
@@ -418,7 +417,6 @@ def learn(*, policy=None, env, test_env,
 					if done:
 						#testob = test_env.reset()
 						break
-
 
 
 
