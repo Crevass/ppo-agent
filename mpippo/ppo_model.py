@@ -5,11 +5,11 @@ import gym
 from policies import MlpPolicy
 import time
 
-class Tester(object):
+class Synchronizer(object):
 	def __init__(self, env, n_episode):
 		self.env = env
 		self.n_episode = n_episode
-	def test(self, agent, seed):
+	def evaluate(self, agent, seed):
 		eprews = np.zeros(self.n_episode)
 		ep_reward = 0
 		self.env.seed(seed)
@@ -26,6 +26,10 @@ class Tester(object):
 			eprews[ep] = ep_reward
 		avg_eprew = eprews.mean()
 		return avg_eprew
+
+	def sync_wrt_eprew(self, model, seed):
+		local_eprew = self.evaluate(model.agent_model, seed)
+		
 
 class Runner(object):
 	def __init__(self, env, model, n_step, gamma, lam):
@@ -229,7 +233,12 @@ class PPOModel(object):
 			# scale params with agent_number
 			global_p = global_p / MPI.COMM_WORLD.Get_size()
 			sess.run(_apply_params, feed_dict={feed_params: global_p, TAU_GLOBAL:tau})
+		
+		def get_params():
+			return sess.run(self.flat_params)
 
+		def apply_params(p, tau=1.0):
+			sess.run(_apply_params, feed_dict={feed_params: p, TAU_GLOBAL: tau})
 
 		self.train = train
 		self.update_old_pi = update_old_pi
