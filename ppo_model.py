@@ -39,7 +39,8 @@ class Synchronizer(object):
 		global_p = np.zeros_like(local_p,dtype=np.float64)
 		local_p = local_p * weight
 		MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
-		model.apply_params(global_p)
+		global_p.astype(np.float32)
+		model.apply_params(global_p,tau=0.8)
 
 
 class Runner(object):
@@ -400,7 +401,7 @@ def learn(*, policy=None, env, test_env, eval_env,
 			for start in range(0, timestep_per_actor, optim_batchsize):
 				end = start + optim_batchsize
 				mb_index = index[start:end]
-				ploss, vloss = ppo_model.train(lr=cur_lr_att*optim_stepsize,
+				ploss, vloss = ppo_model.train(lr=cur_lr_att*optim_stepsize*(MPI.COMM_WORLD.Get_rank()+1),
 							cliprange=clipparam,
 							mb_obs=ob[mb_index],
 							mb_acs=ac[mb_index],
