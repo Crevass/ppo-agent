@@ -51,7 +51,7 @@ def fc(input_layer, nn_num, use_bias, trainable, scope, monitor_weight=False, mo
 
 
 def res_connection(inpt, oupt, trainable, scope):
-	if inpt.shape == oupt.shape:
+	if inpt.shape[-1] == oupt.shape[-1]:
 		x = tf.add(inpt, oupt)
 	else:
 		branch = fc(inpt, oupt.shape[-1], True, trainable, scope)
