@@ -6,8 +6,8 @@ import mpi4py.MPI as MPI
 from policies import MlpPolicy
 import ppo_model
 
-#ENV_NAME ='BipedalWalkerHardcore-v2'
-ENV_NAME = 'LunarLanderContinuous-v2'
+ENV_NAME ='BipedalWalkerHardcore-v2'
+#ENV_NAME = 'LunarLanderContinuous-v2'
 #ENV_NAME = 'Pendulum-v0'
 Path = './'
 
@@ -29,12 +29,12 @@ if __name__ == '__main__':
 
 	# train policy model
 	ppo_model.learn(env=env, test_env=test_env, eval_env=eval_env,
-				timestep_per_actor=2048,
+				timestep_per_actor=4096,
 				clipparam=0.2,
 				c_entropy=0.01, c_vf=1.0,
 			optim_epchos=10, optim_batchsize=64, optim_stepsize=3e-4,
 			gamma=0.99, lam=0.95,
-			max_timesteps=0, max_episode=0, max_iters=1e5, max_second=0,
+			max_timesteps=0, max_episode=0, max_iters=1000, max_second=0,
 			schedule='linear', file_path=Path, record_turn=50, cur_episode=100,
 			terminate_reward=200
 			)

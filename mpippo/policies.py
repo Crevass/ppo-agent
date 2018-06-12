@@ -10,8 +10,8 @@ from Filters import MPIRunningMeanStd
 #SAVE_PATH = '/home/wang/Research/MODELS/PPO-MODEL/under_coding/'
 
 L1NUM = 64
-L2NUM = 64
-L3NUM = 64
+L2NUM = 128
+L3NUM = 128
 L4NUM = 64
 
 class MlpPolicy(object):
@@ -44,14 +44,17 @@ class MlpPolicy(object):
 		with tf.variable_scope(scope):
 			l1 = dense_layer(observation, L1NUM, tf.tanh, True, trainable, 'fc1', (True and trainable), False, False)
 			l2 = dense_layer(l1, L2NUM, tf.tanh, True, trainable, 'fc2', (True and trainable), False, False)
-			dist = NormalDist(l2, ac_space, trainable)
+			l3 = dense_layer(l2, L3NUM, tf.tanh, True, trainable, 'fc3', (True and trainable), False, False)
+			#l4 = dense_layer(l3, L4NUM, tf.tanh, True, trainable, 'fc4', (True and trainable), False, False)
+			dist = NormalDist(l3, ac_space, trainable)
 		return dist
 
 	def _build_vf(self, ac_space, ob_space, observation, trainable, scope, scale=0.1):
 		with tf.variable_scope(scope):
 			l1 = dense_layer(observation, L1NUM, tf.tanh, True, trainable, 'fc1', True, False, False)
 			l2 = dense_layer(l1, L2NUM, tf.tanh, True, trainable, 'fc2', True, False, False)
-			final = dense_layer(l2, 1, None, False, trainable, 'final', True, False, False)
+			l3 = dense_layer(l2, L3NUM, tf.tanh, True, trainable, 'fc3', True, False, False)
+			final = dense_layer(l3, 1, None, False, trainable, 'final', True, False, False)
 		return final
 
 ############################################################################################################
