@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 from distributions import NormalDist
 import mpi4py.MPI as MPI
-from layers_construct import dense_layer
+from layers_construct import dense_layer, fc, res_connection
 import time
 from Filters import MPIRunningMeanStd
 
@@ -28,7 +28,8 @@ class MlpPolicy(object):
 		with tf.variable_scope('ob_filter'):
 			self.ob_rms = MPIRunningMeanStd(epsilon=1e-2, shape=ob_space.shape, sess=self.sess)
 		# filtering ob
-		obz = tf.clip_by_value(((self.ob - self.ob_rms.mean) / self.ob_rms.std), -5.0, 5.0)
+		#obz = tf.clip_by_value(((self.ob - self.ob_rms.mean) / self.ob_rms.std), -5.0, 5.0)
+		obz = ((self.ob - self.ob_rms.mean) / self.ob_rms.std)
 		# build up policy
 		self.pi = self._build_policy(ac_space, ob_space, obz, True, 'pol')
 		#build old policy
@@ -40,21 +41,23 @@ class MlpPolicy(object):
 		self.obtain_v = tf.squeeze(self.vf, axis=0)
 ###################################### network construction ###########################################################
 
-	def _build_policy(self, ac_space, ob_space, observation, trainable, scope, scale=0.1):
+	def _build_policy(self, ac_space, ob_space, ob, trainable, scope, scale=0.1):
 		with tf.variable_scope(scope):
-			l1 = dense_layer(observation, L1NUM, tf.tanh, True, trainable, 'fc1', (True and trainable), False, False)
-			l2 = dense_layer(l1, L2NUM, tf.tanh, True, trainable, 'fc2', (True and trainable), False, False)
-			l3 = dense_layer(l2, L3NUM, tf.tanh, True, trainable, 'fc3', (True and trainable), False, False)
-			#l4 = dense_layer(l3, L4NUM, tf.tanh, True, trainable, 'fc4', (True and trainable), False, False)
-			dist = NormalDist(l3, ac_space, trainable)
+			l1 = tf.tanh(fc(ob, L1NUM, True, trainable, 'fc1', (True and trainable), False, False))
+			l2 = tf.tanh(fc(l1, L2NUM, True, trainable, 'fc2', (True and trainable), False, False))
+			l3 = fc(l2, L3NUM, True, trainable, 'fc3', (True and trainable), False, False)
+			res_l3 = tf.tanh(res_connection(l2, l3, trainable, 'br1'))
+			l4 = fc(res_l3, L4NUM, True, trainable, 'fc4', (True and trainable), False, False)
+			res_l4 = tf.tanh(res_connection(l1, l4, trainable, 'br2'))
+			dist = NormalDist(res_l4, ac_space, trainable)
 		return dist
 
-	def _build_vf(self, ac_space, ob_space, observation, trainable, scope, scale=0.1):
+	def _build_vf(self, ac_space, ob_space, ob, trainable, scope, scale=0.1):
 		with tf.variable_scope(scope):
-			l1 = dense_layer(observation, L1NUM, tf.tanh, True, trainable, 'fc1', True, False, False)
+			l1 = dense_layer(ob, L1NUM, tf.tanh, True, trainable, 'fc1', True, False, False)
 			l2 = dense_layer(l1, L2NUM, tf.tanh, True, trainable, 'fc2', True, False, False)
-			l3 = dense_layer(l2, L3NUM, tf.tanh, True, trainable, 'fc3', True, False, False)
-			final = dense_layer(l3, 1, None, False, trainable, 'final', True, False, False)
+			#l3 = dense_layer(l2, L3NUM, tf.tanh, True, trainable, 'fc3', True, False, False)
+			final = dense_layer(l2, 1, None, False, trainable, 'final', True, False, False)
 		return final
 
 ############################################################################################################

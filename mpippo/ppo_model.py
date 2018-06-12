@@ -30,8 +30,8 @@ class Synchronizer(object):
 	def sync_wrt_eprew(self, model, seed):
 		assert isinstance(model, PPOModel), 'Should input a PPOModel class'
 		base = 1000.0
-		avg_eprew = self.evaluate(model.agent_model, seed) + base
-		local_eprew = np.array([avg_eprew], dtype=np.float64)
+		avg_eprew = self.evaluate(model.agent_model, seed)
+		local_eprew = np.array([avg_eprew+base], dtype=np.float64)
 		total_eprew = np.zeros(1,dtype=np.float64)
 		MPI.COMM_WORLD.Allreduce(local_eprew, total_eprew, op=MPI.SUM)
 		weight = local_eprew / total_eprew
@@ -41,7 +41,7 @@ class Synchronizer(object):
 		MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
 		global_p.astype(np.float32)
 		model.apply_params(global_p,tau=0.8)
-
+		return avg_eprew, weight
 
 class Runner(object):
 	def __init__(self, env, model, n_step, gamma, lam):
@@ -176,31 +176,30 @@ class PPOModel(object):
 		feed_params = tf.placeholder(dtype=tf.float32, shape=self.flat_params.shape, name='feed_params')
 
 		## opt for gradient assignment and update
-		update_list = []
-		start = 0
-		for p in self.train_params:
-			end = start + int(np.prod(p.shape))
-			update_list.append(tf.reshape(feed_grads[start:end], shape=p.shape))
-			start = end
-		# create grad-params pair list
-		grads_list = list(zip(update_list, self.train_params))
-		local_grad_list = list(zip(grads, self.train_params))
-		self.optimizer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
-		_train = self.optimizer.apply_gradients(grads_list)
-		_local_train = self.optimizer.apply_gradients(local_grad_list)
-
+		with tf.name_scope("Apply_grads"):
+			update_list = []
+			start = 0
+			for p in self.train_params:
+				end = start + int(np.prod(p.shape))
+				update_list.append(tf.reshape(feed_grads[start:end], shape=p.shape))
+				start = end
+			# create grad-params pair list
+			grads_list = list(zip(update_list, self.train_params))
+			self.optimizer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
+			_train = self.optimizer.apply_gradients(grads_list)
+		
 		## opt for params assignment
-		p_list = []
-		start = 0
-		for p in self.all_params:
-			end = start + int(np.prod(p.shape))
-			p_list.append(tf.reshape(feed_params[start:end], shape=p.shape))
-			start = end
-		_apply_params = [old.assign(new*TAU_GLOBAL + (1-TAU_GLOBAL)*old) for old, new in zip(self.all_params, p_list)]
-
+		with tf.name_scope("Apply_params"):
+			p_list = []
+			start = 0
+			for p in self.all_params:
+				end = start + int(np.prod(p.shape))
+				p_list.append(tf.reshape(feed_params[start:end], shape=p.shape))
+				start = end
+			_apply_params = [old.assign(new*TAU_GLOBAL + (1-TAU_GLOBAL)*old) for old, new in zip(self.all_params, p_list)]
 
 		# minibatch train
-		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, use_global_grad, scale_by_procs=True):
+		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, use_global_grad, apply_noise, scale_by_procs=True):
 			mb_adv = (mb_adv - mb_adv.mean()) / mb_adv.std()
 			feeddict = {agent_model.ob: mb_obs,
 						a: mb_acs,
@@ -208,25 +207,23 @@ class PPOModel(object):
 						target_v: mb_targv,
 						old_v: mb_vs,
 						CLIP_RANGE: cliprange}
-			if use_global_grad:
-				# get local gradients list
-				local_grad = sess.run(self.flat_grads, feed_dict=feeddict)
-				assert local_grad.ndim == 1, 'gradients not flattened!'
+			# get local gradients list
+			local_grad = sess.run(self.flat_grads, feed_dict=feeddict)
+			assert local_grad.ndim == 1, 'gradients not flattened!'
+			if apply_noise:
+				local_grad += np.random.normal(loc=0, scale=0.1, size=local_grad.shape)
+			# initialize global gradients list
+			final_grad = local_grad.copy()
 
-				# initialize global gradients list
-				global_grad = np.zeros_like(local_grad)
-				
+			if use_global_grad:					
 				# sync gradients in global gradients buffer
-				MPI.COMM_WORLD.Allreduce(local_grad, global_grad, op=MPI.SUM)
-				
+				MPI.COMM_WORLD.Allreduce(local_grad, final_grad, op=MPI.SUM)	
 				# scale the global gradients with mpirun number
 				if scale_by_procs:
-					global_grad = global_grad / MPI.COMM_WORLD.Get_size()
-				
-				sess.run(_train, feed_dict={LR:lr, feed_grads: global_grad})
-			else:
-				feeddict[LR] = lr
-				sess.run(_local_train, feed_dict=feeddict)
+					final_grad = final_grad / MPI.COMM_WORLD.Get_size()
+			
+			sess.run(_train, feed_dict={LR:lr, feed_grads: final_grad})
+			
 			return sess.run([pg_loss, vf_loss], feed_dict=feeddict)
 
 		# update old pi with pi
@@ -236,16 +233,19 @@ class PPOModel(object):
 		def sync_params(tau=1.0):
 			# get local params
 			local_p = sess.run(self.flat_params)
-
 			# prepare global buffer
 			global_p = np.zeros_like(local_p)
 			# sync
 			MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
-
 			# scale params with agent_number
 			global_p = global_p / MPI.COMM_WORLD.Get_size()
 			sess.run(_apply_params, feed_dict={feed_params: global_p, TAU_GLOBAL:tau})
 		
+		def apply_noise(sd=0.1):
+			p = sess.run(self.flat_params)
+			p += np.random.normal(loc=0, scale=sd, size=p.shape)
+			sess.run(_apply_params, feed_dict={feed_params: p, TAU_GLOBAL: 1.0})		
+
 		def get_params():
 			return sess.run(self.flat_params)
 
@@ -258,7 +258,7 @@ class PPOModel(object):
 		self.agent_model = agent_model
 		self.get_params = get_params
 		self.apply_params = apply_params
-
+		self.apply_noise = apply_noise
 def learn(*, policy=None, env, test_env, eval_env,
 			timestep_per_actor,
 			clipparam,
@@ -277,7 +277,7 @@ def learn(*, policy=None, env, test_env, eval_env,
 	sess = tf.Session(
 			config=tf.ConfigProto(
 				gpu_options=gpu_option,
-				#log_device_placement=False
+				log_device_placement=False
 				)
 			)
 
@@ -334,12 +334,10 @@ def learn(*, policy=None, env, test_env, eval_env,
 		
 		if MPI.COMM_WORLD.Get_rank() == 0: 
 			print("********************** Iteration %i **********************" %iters)
-		# get new replay
-		#print("--- Generating replay...")
-		# seeding every env
-		#runner.reset_with_seed(iters) 
+			print("--- Generating replay...")
 		batch = runner.run()
-		#print("--- Replay generated.")
+		print("--- Worker %i generated" %MPI.COMM_WORLD.Get_rank())
+
 		ob, ac, adv, vs, targv = batch["ob"], batch["ac"], batch["adv"], batch["vs"], batch["targv"]
 		eprew = batch["epreward"]
 		
@@ -359,7 +357,7 @@ def learn(*, policy=None, env, test_env, eval_env,
 			print("|")
 			print("|")
 			print("|")
-			print("----start evaluating...")
+			print("---- start evaluating...")
 			for i in range(10):
 				testob = test_env.reset()
 				while True:
@@ -376,15 +374,11 @@ def learn(*, policy=None, env, test_env, eval_env,
 			break
 
 		# update ob fiter
-		#print("--- Ob_filter updating...")
 		ppo_model.agent_model.ob_rms.update(ob)
-		#print("--- Ob filter updated.")
-		
-		# update old pi
-		#print("--- Updating old policy...")
-		ppo_model.update_old_pi()
-		#print("--- Old policy updated.")
 
+		# update old pi
+		ppo_model.update_old_pi()
+		
 		# train model with replay
 		index = np.arange(timestep_per_actor)
 		#adv = (adv - adv.mean()) / adv.std()
@@ -395,6 +389,7 @@ def learn(*, policy=None, env, test_env, eval_env,
 		pollosses = []
 		if MPI.COMM_WORLD.Get_rank() == 0:
 			print("--- Optimizing...")
+		ppo_model.apply_noise()
 		for oe in range(optim_epchos):
 			# sync parameters
 			np.random.shuffle(index)
@@ -408,10 +403,14 @@ def learn(*, policy=None, env, test_env, eval_env,
 							mb_adv=adv[mb_index],
 							mb_vs=vs[mb_index],
 							mb_targv=targv[mb_index],
+							apply_noise=False,
 							use_global_grad=False)
 				vflosses.append(np.squeeze(vloss))
 				pollosses.append(np.squeeze(ploss))
-		synchronizer.sync_wrt_eprew(ppo_model, iters)
+		if MPI.COMM_WORLD.Get_rank() == 0:
+			print("--- Synchronizing Parameters...")
+		dis_eprew, dis_weight = synchronizer.sync_wrt_eprew(ppo_model, iters)
+		print("---Worker %i, eprew: %.2f, weight: %.3f" %(MPI.COMM_WORLD.Get_rank(), dis_eprew, dis_weight))
 		#ppo_model.sync_params()
 		if MPI.COMM_WORLD.Get_rank() == 0:
 			# update tensorboard
