@@ -36,7 +36,7 @@ if __name__ == '__main__':
 			gamma=0.99, lam=0.95,
 			max_timesteps=0, max_episode=0, max_iters=500, max_second=0,
 			schedule='linear', file_path=Path, record_turn=50, cur_episode=100,
-			terminate_reward=1000
+			terminate_reward=220
 			)
 
 	env.close()

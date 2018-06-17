@@ -54,7 +54,7 @@ class Synchronizer(object):
 		weight = local_eprew / total_eprew
 
 		local_p = model.get_params()
-		global_p = np.zeros_like(local_p, dtype=np.float32)
+		global_p = local_p.copy()
 		local_p = local_p * weight
 		MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
 		#global_p.astype(np.float32)
@@ -73,9 +73,8 @@ class Synchronizer(object):
 			weight = 0.0
 		
 		local_p = model.get_params()
-		global_p = np.zeros_like(local_p, dtype=np.float32)
-		if local_eprew != max_eprew:
-			local_p = np.zeros_like(local_p, dtype=np.float32)
+		global_p = local_p.copy()
+		local_p = local_p * weight
 	
 		MPI.COMM_WORLD.Allreduce(local_p, global_p, op=MPI.SUM)
 		model.apply_params(global_p,tau=0.9)
@@ -160,9 +159,8 @@ class PPOModel(object):
 		old_pi = agent_model.oldpi
 		v = agent_model.vf
 		critic = agent_model.critic
-		oldcritic = agent_model.oldcritic
 
-		r = tf.placeholder(dtype=tf.float32, shape=[None, 1], name="reward")
+		#r = tf.placeholder(dtype=tf.float32, shape=[None, 1], name="reward")
 		a = tf.placeholder(dtype=tf.float32, shape=[None]+list(ac_space.shape), name="a")
 		adv = tf.placeholder(dtype=tf.float32, shape=[None, 1], name="advantage")
 		target_v = tf.placeholder(dtype=tf.float32, shape=[None, 1], name="target_v")
@@ -190,43 +188,62 @@ class PPOModel(object):
 			approxkl = 0.5 * tf.reduce_mean(tf.square(NegLogPac - OldNegLogPac))
 			clipfrac = tf.reduce_mean(tf.to_float(tf.greater(tf.abs(ratio - 1.0), CLIP_RANGE)))
 			
-			# critic 
-			q_loss = tf.reduce_mean(tf.square(critic - (r + 0.95*oldcritic)))
+			# critic loss
+			q_loss = tf.reduce_mean(tf.square(critic - target_v))
+
+			# actor loss
+			m = tf.reduce_mean(critic, keepdims=True)
+			devs_squared = tf.square(critic - m)
+			reduced_var = tf.reduce_mean(devs_squared)
+			reduced_std = tf.sqrt(reduced_var)
+			normalized_q = (critic - m) / reduced_std
+			actor_loss = -tf.reduce_mean(normalized_q) 
+
 
 			#loss = pg_loss - entropy * c_entropy + vf_loss * c_vf
-			loss = pg_loss + simple_vf_loss - entropy * c_entropy
+			loss = pg_loss + simple_vf_loss - entropy * c_entropy + actor_loss*0.5
 			
 			#tf.summary.scalar('total_loss', loss)
 			#tf.summary.scalar('pol_loss', pg_loss)
 			#tf.summary.scalar('vf_loss', simple_vf_loss)
 
+
+		def _grads_placeholder_trainopt(los, para):
+			grads = tf.gradients(los, para)
+			if max_grad_norm is not None:
+				grads, _grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
+			flatten_grads = tf.concat(axis=0, 
+				values=[tf.reshape(gg, shape=[int(np.prod(gg.shape))]) for gg in grads])
+			feed_grads = tf.placeholder(dtype=tf.float32, shape=flatten_grads.shape, name='feed_grads')
+
+			with tf.name_scope("Apply_grads"):
+				update_list = []
+				start = 0
+				for p in para:
+					end = start + int(np.prod(p.shape))
+					update_list.append(tf.reshape(feed_grads[start:end], shape=p.shape))
+					start = end
+				# create grad-params pair list
+				grads_list = list(zip(update_list, para))
+				optimizer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
+				train = optimizer.apply_gradients(grads_list)
+			return flatten_grads, feed_grads, train
+
+		# update old pi
 		pi_params = agent_model.get_pol_variables()
 		oldpi_params = agent_model.get_oldpol_variables()
 		with tf.variable_scope('update_old_pi'):
 			_updatepi = [old.assign(old*(1.0-TAU_LOCAL) + new*TAU_LOCAL) for old, new in zip(oldpi_params, pi_params)]
 
-		cri_params = agent_model.get_critic_variables()
-		oldcri_params = agent_model.get_oldcritic_variables()
-		with tf.variable_scope('update_old_critic'):
-			_updatecritic = [old.assign(old*(1.0-TAU_LOCAL) + new*TAU_LOCAL) for old, new in zip(oldcri_params, cri_params)]
-
-
-
-
-		#self.all_params = agent_model.get_trainable_variables()
+		self.cri_params = agent_model.get_critic_variables()
+		self.pol_and_v_params = agent_model.get_ppo_variables()
 		self.all_params = agent_model.get_variables()
-		self.train_params = tf.trainable_variables(scope=agent_model.scope)
+		#self.train_params = tf.trainable_variables(scope=agent_model.scope)
 		
-		grads = tf.gradients(loss, self.train_params)
-		if max_grad_norm is not None:
-			grads, _grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
-		
-		# get flattened local gradients
-		self.flat_grads = tf.concat(axis=0,
-			values=[tf.reshape(gg, shape=[int(np.prod(gg.shape))]) for gg in grads])
-
-		# placeholder for flatten gradients
-		feed_grads = tf.placeholder(dtype=tf.float32, shape=self.flat_grads.shape, name='feed_grads')
+		with tf.name_scope("critic_grads"):
+			critic_grads, feed_critic, c_train = _grads_placeholder_trainopt(q_loss, self.cri_params)
+		with tf.name_scope("pol_grads"):
+			pol_grads, feed_pol, p_train = _grads_placeholder_trainopt(loss, self.pol_and_v_params)
 
 		# get flattened agent parameters
 		self.flat_params = tf.concat(axis=0,
@@ -235,19 +252,6 @@ class PPOModel(object):
 		# placeholder for flatten params
 		feed_params = tf.placeholder(dtype=tf.float32, shape=self.flat_params.shape, name='feed_params')
 
-		## opt for gradient assignment and update
-		with tf.name_scope("Apply_grads"):
-			update_list = []
-			start = 0
-			for p in self.train_params:
-				end = start + int(np.prod(p.shape))
-				update_list.append(tf.reshape(feed_grads[start:end], shape=p.shape))
-				start = end
-			# create grad-params pair list
-			grads_list = list(zip(update_list, self.train_params))
-			self.optimizer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
-			_train = self.optimizer.apply_gradients(grads_list)
-		
 		## opt for params assignment
 		with tf.name_scope("Apply_params"):
 			p_list = []
@@ -261,7 +265,25 @@ class PPOModel(object):
 		# minibatch train
 		def train(lr, cliprange, mb_obs, mb_acs, mb_adv, mb_vs, mb_targv, use_global_grad, apply_noise, scale_by_procs=True):
 			mb_adv = (mb_adv - mb_adv.mean()) / mb_adv.std()
-			feeddict = {agent_model.ob: mb_obs,
+
+			def _train(grads, grads_placeholder, opt, feeddict):
+				local_grad = sess.run(grads, feed_dict=feeddict)
+				assert local_grad.ndim == 1
+				if apply_noise:
+					local_grad += np.random.normal(loc=0, scale=0.05, size=local_grad.shape)
+				final_grad = local_grad.copy()
+				if use_global_grad:
+					MPI.COMM_WORLD.Allreduce(local_grad, final_grad, op=MPI.SUM)
+					if scale_by_procs:
+						final_grad = final_grad / MPI.COMM_WORLD.Get_size()
+				sess.run(opt, feed_dict={LR: lr, grads_placeholder: final_grad})
+
+			c_train_dict = {agent_model.ob: mb_obs,
+							agent_model.pi: mb_acs,
+							target_v: mb_targv}
+			_train(critic_grads, feed_critic, c_train, c_train_dict)
+
+			pol_train_dict = {agent_model.ob: mb_obs,
 						a: mb_acs,
 						adv: mb_adv,
 						target_v: mb_targv,
@@ -269,24 +291,8 @@ class PPOModel(object):
 						CLIP_RANGE: cliprange}
 
 			# get loss
-			ploss, vloss = sess.run([pg_loss, simple_vf_loss], feed_dict=feeddict)
-
-			# get local gradients list
-			local_grad = sess.run(self.flat_grads, feed_dict=feeddict)
-			assert local_grad.ndim == 1, 'gradients not flattened!'
-			if apply_noise:
-				local_grad += np.random.normal(loc=0, scale=0.05, size=local_grad.shape)
-			# initialize global gradients list
-			final_grad = local_grad.copy()
-
-			if use_global_grad:					
-				# sync gradients in global gradients buffer
-				MPI.COMM_WORLD.Allreduce(local_grad, final_grad, op=MPI.SUM)	
-				# scale the global gradients with mpirun number
-				if scale_by_procs:
-					final_grad = final_grad / MPI.COMM_WORLD.Get_size()
-			
-			sess.run(_train, feed_dict={LR:lr, feed_grads: final_grad})
+			ploss, vloss = sess.run([pg_loss, simple_vf_loss], feed_dict=pol_train_dict)
+			_train(pol_grads, feed_pol, p_train, pol_train_dict)
 			
 			return ploss, vloss
 
@@ -456,14 +462,14 @@ def learn(*, policy=None, env, test_env, eval_env,
 							mb_vs=vs[mb_index],
 							mb_targv=targv[mb_index],
 							apply_noise=False,
-							use_global_grad=False)
+							use_global_grad=True)
 				vflosses.append(np.squeeze(vloss))
 				pollosses.append(np.squeeze(ploss))
 		if MPI.COMM_WORLD.Get_rank() == 0:
 			print("--- Synchronizing Parameters...")
-		dis_eprew, dis_weight = synchronizer.sync_with_best(ppo_model, 3)
-		print("---Worker %i, eprew: %.2f, weight: %.2f" %(MPI.COMM_WORLD.Get_rank(), dis_eprew, dis_weight))
-		#ppo_model.sync_params()
+		#dis_eprew, dis_weight = synchronizer.sync_with_best(ppo_model, 3, seed=((iters+1)*2-1))
+		#print("---Worker %i, eprew: %.2f, weight: %.2f" %(MPI.COMM_WORLD.Get_rank(), dis_eprew, dis_weight))
+		ppo_model.sync_params()
 		
 
 		# update tensorboard
@@ -471,7 +477,7 @@ def learn(*, policy=None, env, test_env, eval_env,
 			summary = sess.run(merged)
 			writer.add_summary(summary, iters)
 
-		local_avg = synchronizer.evaluate_with_episode(ppo_model.agent_model, 1) 
+		local_avg = synchronizer.evaluate_with_episode(ppo_model.agent_model, 1, seed=np.random.randint(10000)) 
 		global_avg = np.zeros(MPI.COMM_WORLD.Get_size(), dtype=np.float32)
 		MPI.COMM_WORLD.Allgather(local_avg, global_avg)
 
@@ -507,9 +513,7 @@ def learn(*, policy=None, env, test_env, eval_env,
 
 		
 		# if terminate reward reached, end training and start evaluate
-		#if (buffer_pointer > cur_episode) and (avg >= terminate_reward) and (MPI.COMM_WORLD.Get_rank() == 0):
-		# finally record 
-		if iters >= max_iters:
+		if ((buffer_pointer > cur_episode) and (avg >= terminate_reward) and (MPI.COMM_WORLD.Get_rank() == 0)) or (iters >= max_iters):
 			print("target reached, end trainning")
 			print("|")
 			print("|")

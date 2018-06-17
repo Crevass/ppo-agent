@@ -25,7 +25,7 @@ class MlpPolicy(object):
 	def _init(self, ob_space, ac_space):
 		
 		self.ob = tf.placeholder(dtype=tf.float32, shape=[None]+list(ob_space.shape), name='ob')
-		self.ob_ = tf.placeholder(dtype=tf.float32, shape=[None]+list(ob_space.shape), name='ob_')
+		#self.ob_ = tf.placeholder(dtype=tf.float32, shape=[None]+list(ob_space.shape), name='ob_')
 		# build ob filter
 		#with tf.variable_scope('ob_filter'):
 		#	self.ob_rms = MPIRunningMeanStd(epsilon=1e-2, shape=ob_space.shape, sess=self.sess)
@@ -34,20 +34,20 @@ class MlpPolicy(object):
 		#obz = tf.clip_by_value(((self.ob - self.ob_rms.mean) / self.ob_rms.std), -5.0, 5.0)
 		#obz = ((self.ob - self.ob_rms.mean) / self.ob_rms.std)
 		obz = self.ob
-		obz_ = self.ob_
+		#obz_ = self.ob_
 		
 		# build up policy
 		self.pi = self._build_policy(ac_space, ob_space, obz, True, 'pol')
 		#build old policy
-		self.oldpi = self._build_policy(ac_space, ob_space, obz_, False, 'old_pol')
+		self.oldpi = self._build_policy(ac_space, ob_space, obz, False, 'old_pol')
 		
 		# build value function
 		self.vf = self._build_vf(ac_space, ob_space, obz, True, 'vf')
 			
 		# build critic
-		self.critic = self._build_critic(ac_space, ob_space, self.pi.mean, obz, True, 'critic')
+		self.critic = self._build_critic(ac_space, ob_space, self.pi, obz, True, 'critic')
 		# build old critic
-		self.oldcritic = self._build_critic(ac_space, ob_space, self.oldpi.mean, obz_, False, 'old_critic')
+		#self.oldcritic = self._build_critic(ac_space, ob_space, self.oldpi.mean, obz_, False, 'old_critic')
 
 		self.sample_action = tf.squeeze(self.pi.sample(), axis=0)
 		self.obtain_v = tf.squeeze(self.vf, axis=0)
@@ -117,5 +117,9 @@ class MlpPolicy(object):
 		return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/old_pol')
 	def get_critic_variables(self):
 		return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/critic')
-	def get_oldcritic_variables(self):
-		return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/oldcritic')
+	#def get_oldcritic_variables(self):
+	#	return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/oldcritic')
+	def get_ppo_variables(self):
+		return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/pol') + 
+				tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/old_pol') +
+				tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.scope+'/vf')
